@@ -1,28 +1,26 @@
 """
 A miniature parsing library.
 
->>> grammar = Grammar({'eof':        Terminal(r'$'),                              \
-                       'semicolon':  Terminal.padded(r';'),                       \
-                       'constant':   Terminal(r'[\d]+\.?[\d]*'),                  \
-                       'variable':   Terminal(r'[A-Za-z]+'),                      \
-                       'operator':   Terminal.padded(r'[\+\-\*\/]'),              \
+>>> grammar = Grammar({'constant':   Token(r'[\d]+\.?[\d]*'),                     \
+                       'variable':   Token(r'[A-Za-z]+'),                         \
+                       'operator':   Token(r'[\+\-\*\/]'),                        \
                        'operand':    Pipe('constant', 'variable'),                \
                        'expression': Seq('operand', Star('operator', 'operand')), \
-                       'block':      Seq(Plus('expression', 'semicolon'), 'eof')})
+                       'block':      Seq(Plus('expression', Token(r';')), Token(r'$'))})
 
 >>> valid = ['a+b; c+d;', 'c - d;', '5 * 4;', 'z / 1;']
 >>> invalid = ['$any', 'any +', 'a! + n', '&']
 
 >>> [grammar.parse('block', v) for v in valid]   #doctest: +NORMALIZE_WHITESPACE
-[('block', [[('expression', [('operand', (variable, 'a')), [(operator, '+'), ('operand', (variable, 'b'))]]), (semicolon, '; '),
-             ('expression', [('operand', (variable, 'c')), [(operator, '+'), ('operand', (variable, 'd'))]]), (semicolon, ';')], (eof, '')]), \
- ('block', [[('expression', [('operand', (variable, 'c')), [(operator, ' - '), ('operand', (variable, 'd'))]]), (semicolon, ';')], (eof, '')]),\
- ('block', [[('expression', [('operand', (constant, '5')), [(operator, ' * '), ('operand', (constant, '4'))]]), (semicolon, ';')], (eof, '')]),\
- ('block', [[('expression', [('operand', (variable, 'z')), [(operator, ' / '), ('operand', (constant, '1'))]]), (semicolon, ';')], (eof, '')])]
+[('block', [('expression', [('operand', ('variable', 'a')), ('operator', '+'), ('operand', ('variable', 'b'))]),
+            ('expression', [('operand', ('variable', 'c')), ('operator', '+'), ('operand', ('variable', 'd'))])]),
+ ('block', [('expression', [('operand', ('variable', 'c')), ('operator', '-'), ('operand', ('variable', 'd'))])]),
+ ('block', [('expression', [('operand', ('constant', '5')), ('operator', '*'), ('operand', ('constant', '4'))])]),
+ ('block', [('expression', [('operand', ('variable', 'z')), ('operator', '/'), ('operand', ('constant', '1'))])])]
 >>> [grammar.is_valid('block', i) for i in invalid]
 [False, False, False, False]
 """
-import re
+import itertools, re
 
 class BadGrammar(Exception): pass
 class BadState(Exception):
@@ -74,22 +72,34 @@ class State(tuple):
     def __str__(self):
         return '%s(%s)' % (type(self).__name__, ', '.join(repr(p) for p in self))
 
+    @classmethod
+    def collapse(cls, seq):
+        return list(itertools.chain(*(s if isinstance(s, list) else [s] for s in seq if s)))
+
 class Terminal(State):
     def __new__(cls, *pattern):
         return tuple.__new__(cls, (re.compile(''.join(pattern)),))
 
     def __str__(self):
-        return "r'%s'" % self[0].pattern.replace("\\'", "\\\\'").replace("'", "\\'")
+        return '"%s"' % self[0].pattern.replace('\\"', '\\\\"').replace('"', '\\"')
 
-    @classmethod
-    def padded(cls, pattern):
-        return cls(r'\s*%s\s*' % pattern)
+    def fold(self, match):
+        if self.name:
+            return self.name, match
 
     def matches(self, grammar, string, start=0):
         match = self[0].match(string, start)
         if match is None:
             raise BadState(self, string, start)
-        yield (self, match.group()), match.end()
+        yield self.fold(match.group()), match.end()
+
+class Token(Terminal):
+    def __new__(cls, pattern):
+        return Terminal.__new__(cls, r'\s*%s\s*' % pattern)
+
+    def fold(self, match):
+        if self.name:
+            return self.name, match.strip()
 
 class Empty(Terminal):
     def __str__(self):
@@ -102,8 +112,8 @@ class Symbolic(State): pass
 class Seq(Symbolic):
     def fold(self, match):
         if self.name:
-            return self.name, [m for m in match if m]
-        return [m for m in match if m]
+            return self.name, self.collapse(match)
+        return self.collapse(match)
 
     def matches(self, grammar, string, start=0):
         errlist = [BadState(self, string, start)]
@@ -156,3 +166,8 @@ class Plus(Pipe):
         pattern = Seq(*self)
         while (yield pattern):
             pattern = Seq(*(pattern + self))
+
+class Maybe(Pipe):
+    def __iter__(self):
+        yield Empty()
+        yield self
